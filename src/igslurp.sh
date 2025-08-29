@@ -19,12 +19,35 @@ argc_quiet=${argc_quiet:-0}
 argc_json=${argc_json:-0}
 argc_auto_paginate=${argc_auto_paginate:-0}
 
+# Detect OS for compatibility
+detect_os() {
+  case "$(uname -s)" in
+    Darwin) echo "macos" ;;
+    Linux) echo "linux" ;;
+    *) echo "unknown" ;;
+  esac
+}
+OS=$(detect_os)
+
 setup_colors() {
   if [ "$argc_quiet" = 1 ] || [ -z "$TERM" ] || [ "$TERM" = "dumb" ]; then
     bold="" reset="" blue="" green="" yellow="" cyan="" magenta="" red=""
   else
-    bold=$(tput bold) reset=$(tput sgr0) blue=$(tput setaf 4) green=$(tput setaf 2)
-    yellow=$(tput setaf 3) cyan=$(tput setaf 6) magenta=$(tput setaf 5) red=$(tput setaf 1)
+    # More compatible color setup
+    if command -v tput >/dev/null 2>&1; then
+      bold=$(tput bold 2>/dev/null || echo "")
+      reset=$(tput sgr0 2>/dev/null || echo "")
+      blue=$(tput setaf 4 2>/dev/null || echo "")
+      green=$(tput setaf 2 2>/dev/null || echo "")
+      yellow=$(tput setaf 3 2>/dev/null || echo "")
+      cyan=$(tput setaf 6 2>/dev/null || echo "")
+      magenta=$(tput setaf 5 2>/dev/null || echo "")
+      red=$(tput setaf 1 2>/dev/null || echo "")
+    else
+      # Fallback ANSI codes
+      bold="\033[1m" reset="\033[0m" blue="\033[34m" green="\033[32m"
+      yellow="\033[33m" cyan="\033[36m" magenta="\033[35m" red="\033[31m"
+    fi
   fi
 }
 setup_colors
@@ -56,8 +79,46 @@ print_section() {
   printf "\n${bold}%s:${reset}\n" "$1"
 }
 
+# Cross-platform number formatting
 format_number() {
-  printf "%'d" "$1" 2>/dev/null || echo "$1"
+  local num="$1"
+  # Try locale-aware formatting first, fall back to plain number
+  if [ "$OS" = "macos" ]; then
+    # macOS printf might not support %'d
+    if printf "%'d" "$num" 2>/dev/null | grep -q ",\|\."; then
+      printf "%'d" "$num" 2>/dev/null
+    else
+      echo "$num"
+    fi
+  else
+    # Linux usually supports %'d
+    printf "%'d" "$num" 2>/dev/null || echo "$num"
+  fi
+}
+
+# Cross-platform date formatting
+format_date() {
+  local timestamp="$1"
+  if [ "$OS" = "macos" ]; then
+    # macOS date command uses -r for timestamp
+    date -r "$timestamp" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "N/A"
+  else
+    # Linux date command uses -d
+    date -d "@$timestamp" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "N/A"
+  fi
+}
+
+# Cross-platform float comparison (avoiding bc dependency)
+compare_float() {
+  local num="$1"
+  local threshold="$2"
+  # Simple integer comparison for most cases
+  if [[ "$num" =~ ^[0-9]+$ ]]; then
+    [ "$num" -gt 0 ]
+  else
+    # For floats, use awk which is more universally available than bc
+    awk -v n="$num" -v t="$threshold" 'BEGIN { exit !(n > t) }' 2>/dev/null
+  fi
 }
 
 make_request() {
@@ -222,10 +283,10 @@ format_profile() {
   print_section "Stats"
   printf "  ${cyan}Posts:${reset} ${green}%s${reset}\n" "$(format_number "$media_count")"
   printf "  ${cyan}Followers:${reset} ${green}%s${reset}\n" "$(format_number "$follower_count")"
-   printf "  ${cyan}Following:${reset} ${green}%s${reset}\n" "$(format_number "$following_count")"
+  printf "  ${cyan}Following:${reset} ${green}%s${reset}\n" "$(format_number "$following_count")"
 
-   local profile_pic_url
-   profile_pic_url=$(echo "$response" | jq -r '.profile_pic_url // empty')
+  local profile_pic_url
+  profile_pic_url=$(echo "$response" | jq -r '.profile_pic_url // empty')
   if [ -n "$profile_pic_url" ]; then
     print_kv "Profile Picture" "${blue}${profile_pic_url}${reset}"
   fi
@@ -286,7 +347,7 @@ format_reels() {
   echo "$response" | jq -r '.data.items[] | "\(.media.pk)|\(.media.code)|\(.media.media_type)|\(.media.taken_at)|\(.media.caption.text // "N/A")|\(.media.user.username)|\(.media.user.full_name // "N/A")|\(.media.user.is_verified)|\(.media.like_count // 0)|\(.media.comment_count // 0)|\(.media.play_count // 0)|\(.media.video_duration // 0)"' |
     while IFS="|" read -r media_id code media_type taken_at caption_text username full_name is_verified like_count comment_count play_count duration; do
       if [[ "$taken_at" =~ ^[0-9]+$ ]]; then
-        formatted_date=$(date -d "@$taken_at" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "N/A")
+        formatted_date=$(format_date "$taken_at")
       else
         formatted_date="N/A"
       fi
@@ -298,7 +359,7 @@ format_reels() {
         *) media_type_name="Unknown" ;;
       esac
 
-      if [[ "$duration" =~ ^[0-9]*\.?[0-9]+$ ]] && (( $(echo "$duration > 0" | bc -l 2>/dev/null || echo "0") )); then
+      if [[ "$duration" =~ ^[0-9]*\.?[0-9]+$ ]] && compare_float "$duration" "0"; then
         duration_str=$(printf "%.1fs" "$duration")
       else
         duration_str="N/A"
@@ -315,10 +376,10 @@ format_reels() {
       printf "  ${cyan}Date:${reset} %s\n" "$formatted_date"
 
       if [ "$duration_str" != "N/A" ]; then
-         printf "  ${cyan}Duration:${reset} %s\n" "$duration_str"
-       fi
+        printf "  ${cyan}Duration:${reset} %s\n" "$duration_str"
+      fi
 
-       print_section "Stats"
+      print_section "Stats"
       printf "  ${green}Likes:${reset} %s\n" "$(format_number "$like_count")"
       printf "  ${yellow}Comments:${reset} %s\n" "$(format_number "$comment_count")"
       printf "  ${blue}Plays:${reset} %s\n" "$(format_number "$play_count")"
@@ -338,6 +399,7 @@ format_reels() {
     done
 }
 
+# Rest of the script remains the same...
 if [ -z "$argc_command" ]; then
   show_help
   exit 0
@@ -371,7 +433,7 @@ user-id)
   [ "$argc_json" = 1 ] && echo "$response" | jq || format_user_id "$response"
   ;;
 
- following)
+following)
   if [ -z "$argc_value" ]; then
     echo "${red}Error:${reset} Username or user ID is required." >&2
     exit 1
@@ -391,7 +453,7 @@ user-id)
   [ "$argc_json" = 1 ] && echo "$response" | jq || format_user_list "$response" "Following"
   ;;
 
- followers)
+followers)
   if [ -z "$argc_value" ]; then
     echo "${red}Error:${reset} Username or user ID is required." >&2
     exit 1
@@ -404,14 +466,14 @@ user-id)
   [ -n "$argc_count" ] && params="${params}&count=${argc_count}"
 
   if [ "$argc_auto_paginate" = 1 ]; then
-    response=$(make_paginated_request "followers" "$params")
+    response=$(make_paginated_request "followers" "$params" "users")
   else
     response=$(make_request "followers" "$params")
   fi
   [ "$argc_json" = 1 ] && echo "$response" | jq || format_user_list "$response" "Followers"
   ;;
 
- posts)
+posts)
   if [ -z "$argc_value" ]; then
     echo "${red}Error:${reset} User ID or username is required." >&2
     exit 1
@@ -449,25 +511,25 @@ highlights)
   [ "$argc_json" = 1 ] && echo "$response" | jq || echo "$response" | jq
   ;;
 
-   reels)
-     if [ -z "$argc_value" ]; then
-       echo "${red}Error:${reset} Username or user ID is required." >&2
-       exit 1
-     fi
+reels)
+  if [ -z "$argc_value" ]; then
+    echo "${red}Error:${reset} Username or user ID is required." >&2
+    exit 1
+  fi
 
-     # Resolve username to user_id if needed
-     user_id=$(resolve_user_id "$argc_value")
-     params="?user_id=${user_id}"
-     [ -n "$argc_max_id" ] && params="${params}&next_max_id=${argc_max_id}"
-     [ -n "$argc_count" ] && params="${params}&count=${argc_count}"
+  # Resolve username to user_id if needed
+  user_id=$(resolve_user_id "$argc_value")
+  params="?user_id=${user_id}"
+  [ -n "$argc_max_id" ] && params="${params}&next_max_id=${argc_max_id}"
+  [ -n "$argc_count" ] && params="${params}&count=${argc_count}"
 
-     if [ "$argc_auto_paginate" = 1 ]; then
-       response=$(make_paginated_request "reels" "$params" "data.items")
-     else
-       response=$(make_request "reels" "$params")
-     fi
-     [ "$argc_json" = 1 ] && echo "$response" | jq || format_reels "$response"
-     ;;
+  if [ "$argc_auto_paginate" = 1 ]; then
+    response=$(make_paginated_request "reels" "$params" "data.items")
+  else
+    response=$(make_request "reels" "$params")
+  fi
+  [ "$argc_json" = 1 ] && echo "$response" | jq || format_reels "$response"
+  ;;
 
 *)
   echo "${red}Error:${reset} Unknown command: ${argc_command}" >&2
