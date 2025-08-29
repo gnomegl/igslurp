@@ -168,7 +168,7 @@ make_paginated_request() {
     fi
 
     # Small delay to be respectful to the API
-    sleep 1
+    sleep 0.5
   done
 
   # Return combined results in the same format as single request
